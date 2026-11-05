@@ -1,0 +1,155 @@
+# RF-DETR Copilot Instructions
+
+> [!NOTE]
+>
+> This document is GitHub Copilot-specific guidance. For canonical contribution guidelines (test-driven development, code quality, docstrings, etc.), see [CONTRIBUTING.md](CONTRIBUTING.md). For detailed agent-specific context, see [AGENTS.md](../AGENTS.md).
+
+## Repository Overview
+
+RF-DETR is a real-time transformer architecture for object detection and instance segmentation. Built on DINOv2 vision transformer backbone with PyTorch.
+
+- **Project Type:** Python ML library (computer vision)
+- **Python:** >=3.10 (3.10, 3.11, 3.12, 3.13, 3.14)
+- **License:** Apache 2.0, commercially usable out of the box (package, Nano–Large detection, every Seg size, Keypoint). Plus models use PML 1.0: commercial use included on Roboflow, commercial self-hosting requires the Enterprise add-on.
+
+> [!TIP]
+>
+> - **Configuration:** See `pyproject.toml` for dependencies, build settings, and tool configurations.
+> - **Contributing:** See `.github/CONTRIBUTING.md` for contribution guidelines, CLA, and coding standards.
+
+## Quick Start
+
+**Package Manager:** This project uses `uv` for all dependency management.
+
+```bash
+# Create the environment
+uv venv
+
+# Install the dependencies used by the CPU test job (add ,coreml on macOS).
+uv pip install -e ".[train,augment,cli,visual,data]" --group tests --torch-backend=cpu
+
+# Run tests (always before committing)
+uv run --no-sync pytest src/ tests/ scripts/ -n 2 -m "not gpu" --cov=rfdetr --cov-report=xml
+
+# Build package
+uv build
+```
+
+> [!IMPORTANT]
+>
+> Re-run the install command above after pulling changes to update dependencies.
+
+**Dependency extras:** `rfdetr[train]` is intentionally minimal and uses torchvision-native default augmentations. Custom Albumentations CPU configs and Kornia GPU augmentation both require `rfdetr[augment]`.
+
+**CUDA graph precision:** `cuda_graphs=True` routes BF16 capture through PyTorch and fixed-shape FP8 capture through Transformer Engine when `compile=False`. Keep the registered model unchanged. FP8 graphs require the active Lightning recipe, one GPU, detection, and no accumulation; see `AGENTS.md` for guards. Never wrap a compiled model with the eager capture runner.
+
+## Code Quality
+
+**Linting & Formatting:** All code must pass pre-commit checks. See **[Code Quality and Linting](CONTRIBUTING.md#code-quality-and-linting)** in CONTRIBUTING.md for setup and details.
+
+```bash
+pre-commit run --all-files
+```
+
+> **Configuration:** `.pre-commit-config.yaml` (hooks) and `[tool.ruff]` in `pyproject.toml` (Python linting)
+
+## Key Conventions
+
+> [!NOTE]
+>
+> Internal package organization (`src/rfdetr/`) is subject to change as this is an active research project. Explore the codebase to understand current module organization.
+
+**Imports:**
+
+- Always use direct imports: `from rfdetr.utilities.distributed import get_rank, is_main_process`
+- Logger: `from rfdetr.utilities.logger import get_logger` (reads `LOG_LEVEL` env var)
+- **Never use** `rfdetr.util.*` or `rfdetr.deploy.*` — deprecated shims scheduled for removal in v1.9.0
+- TQDM: `from tqdm.auto import tqdm` (NOT `from tqdm import tqdm`)
+
+## Testing & Development Workflow
+
+**Test-Driven Development:** Follow TDD practices - write tests first for bugs, comprehensive tests for features. See **[Test-Driven Development](CONTRIBUTING.md#test-driven-development)** in CONTRIBUTING.md for detailed guidelines.
+
+**Quick reference:**
+
+- Bug fixes: Write failing test → Fix → Verify all pass
+- Features: Write comprehensive tests → Implement → Refactor
+- Use test classes and `@pytest.mark.parametrize` for organization
+- Mark GPU/heavy tests with `@pytest.mark.gpu`
+- No `pytest.importorskip`, and no `pytest.skip()` for missing optional dependencies: gate optional-dependency tests with a named `skipif` decorator (flag from `rfdetr.export.imports` / `rfdetr.utilities.imports`; add a new flag there and never re-probe with `find_spec` in a test file) and import the package locally inside the test. Reserve `pytest.skip()` for conditions discoverable only at runtime. Details: [CONTRIBUTING.md](CONTRIBUTING.md#test-organization).
+
+**Testing Requirements:**
+
+- ⚠️ During development: Tests may fail (TDD cycle is fine)
+- ✅ Before PR: Final commit MUST have all tests passing
+- ✅ Before commit: Run `pre-commit run --all-files`
+
+**CI/CD:** See `.github/workflows/` for source of truth. Tests run on Python 3.10-3.14 on Ubuntu, and on Python 3.10 and 3.13 on Windows and macOS.
+
+## Coding Standards
+
+**Type Hints & Docstrings:** MANDATORY for all functions/classes. See **[Google-Style Docstrings and Mandatory Type Hints](CONTRIBUTING.md#google-style-docstrings-and-mandatory-type-hints)** in CONTRIBUTING.md for examples.
+
+**Import Conventions:**
+
+```python
+# Always use direct imports (NOT import ... as pattern)
+from rfdetr.utilities.distributed import get_rank, is_main_process, save_on_master
+from rfdetr.utilities.logger import get_logger
+
+# TQDM (for environment compatibility)
+from tqdm.auto import tqdm  # NOT from tqdm import tqdm
+```
+
+**Project-Specific Patterns:**
+
+- **Model selection:** Default to `RFDETRSmall` / `"rfdetr-small"` in docs and examples; default to `RFDETRNano` / `"rfdetr-nano"` in CI and tests. **Never use base models** (`RFDETRBase` / `"rfdetr-base"`) — treat as deprecated; substitute `small` in docs/examples and `nano` in CI/tests. Pick a released detection size (`nano`/`small`/`medium`/`large`) for detection and a released segmentation size (`seg-nano`/`seg-small`/`seg-medium`/`seg-large`) for segmentation; `-preview` variants are only for capabilities with no released sized version — now just `keypoint-preview`. `seg-preview` is superseded; use a sized seg model instead.
+- **Logging:** Use `logger.debug()` for detailed tensor/shape info (not `logger.info()`)
+- **Segmentation models:** Return `pred_masks` as `torch.Tensor` or dict with keys `['spatial_features', 'query_features', 'bias']`
+- **Checkpoint handling:** Always check file existence before operations
+- **Inference:** Use `model.inference(compile=..., batch_size=..., dtype=..., compile_backend=...)` for an independent native predictor snapshot; capture the returned `RFDETRInference` and call `predictor.predict(images)`. It copies the current base weights, labels, normalization and postprocessing settings once, leaves the source unchanged, and ignores later source mutations. Its defaults are a captured CUDA graph on CUDA, inductor on MPS where the installed PyTorch has its code generator and TorchScript on every other device, with batch 1 and float32. The removed `inplace` keyword is rejected. `remove_optimized_model()` and `is_optimized_inplace` are legacy model-state APIs, not predictor lifecycle controls. `RFDETRInference(source)` remains available for a checkpoint, full export, or explicitly borrowed live model; the borrowed model's current state is read per prediction. Omit `device` for borrowed live sources and configure the native model itself. Only `RFDETRInference.predict()` expands sources and streams results through the private `rfdetr._prediction` package; `RFDETR.predict()` stays images-only and rejects source options. Eager image lists use one batch. Reject incompatible shape or batch requests instead of splitting or padding them.
+- Use validated inference metadata for task, class, output, and preprocessing semantics; do not use user `notes`. ONNX embeds metadata; other formats use an adjacent `<artifact-name>.rfdetr.json` file. Older artifacts can receive missing semantics through `metadata=`. Sidecar-backed loads hash the artifact to check for stale metadata. Intermediate ONNX from TensorRT or TFLite conversion has no ONNX metadata.
+- Keep runtime adapters lazy and limit them to runtime execution and tensor mapping. ONNX and TFLite private NumPy helpers remain for dependency-light numerical references and share raw execution with adapters. TensorRT and OpenVINO adapters call shared session and execution functions directly. Their deprecated raw classes are compatibility facades over the same functions. CoreML and Core AI adapters use vendor APIs directly. Raw runtime interfaces support advanced access and forward-only benchmarks. Reject backbone-only artifacts. See `AGENTS.md` for format constraints.
+- **License headers:** All Python files require Apache 2.0 header (enforced by pre-commit)
+
+**Best Practices:**
+
+- Make minimal, surgical changes - avoid over-engineering
+- Use existing patterns and libraries
+- Write secure code - avoid injection vulnerabilities (XSS, SQL injection, command injection)
+- Follow Python ML development best practices
+
+## Pre-Commit Checklist
+
+Before submitting changes:
+
+1. ✅ Run tests: `uv run --no-sync pytest src/ tests/ scripts/ -n 2 -m "not gpu"`
+2. ✅ Run pre-commit: `pre-commit run --all-files`
+3. ✅ Verify new functions have type hints + docstrings
+4. ✅ For code reviews, follow the [code-review skill](skills/code-review/SKILL.md).
+
+## Resources
+
+- **Docs:** https://rfdetr.roboflow.com
+- **Contributing:** `.github/CONTRIBUTING.md`
+- **Config:** `pyproject.toml`, `.pre-commit-config.yaml`
+- **Issues:** https://github.com/roboflow/rf-detr/issues
+
+## Maintaining Agentic Documentation
+
+**If your contribution:**
+
+- Changes project structure or introduces new patterns
+- Receives major feedback in PR review about conventions/patterns
+
+**Then update the relevant documents:**
+
+- This file (copilot-instructions.md) for high-level guidance
+- AGENTS.md for detailed technical patterns
+- CONTRIBUTING.md if it affects human contribution workflow
+
+This ensures future contributions stay consistent and reduces repeated feedback.
+
+---
+
+**Note:** These instructions are GitHub Copilot-specific. When in doubt, refer to existing code patterns, contributing guidelines, and test files for examples.
