@@ -103,7 +103,7 @@ train = [
     #   rejects that as a `Requires-Dist` entry, which would have failed at the PyPI upload step —
     #   so this stays a normal PyPI version pin instead. Once 0.1.0 ships, replace this line with:
     #   "torch-linear-assignment>=0.1.0,<0.2.0",
-    "torch-hungarian==0.1.0rc0",
+    "torch-hungarian==0.1.0rc2",
     "roboflow",
 ]
 # Transformer Engine's PyTorch extension needs NVIDIA CUDA and a Linux x86-64 build environment.
